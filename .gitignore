@@ -1,0 +1,5 @@
+initramfs/bin/busybox
+initramfs.gz-*
+boot.img-*
+zImage-*
+dt-*

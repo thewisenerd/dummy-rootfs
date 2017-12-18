@@ -1,0 +1,162 @@
+#!/bin/sh
+
+# mer boat loader kang!
+
+# Copyright (c) 2014 Jolla Oy
+#
+# This program is free software; you can redistribute it and/or modify it under
+# the terms of the GNU General Public License version 2 as published by the
+# Free Software Foundation.
+#
+# Authors:
+#   - Tom Swindell <t.swindell@rubyx.co.uk>
+#   - David Greaves <david@dgreaves.com>
+
+export PATH=/bin:/sbin
+
+USB_FUNCTIONS=rndis
+ANDROID_USB=/sys/class/android_usb/android0
+
+UDHCPD_CONF=/etc/udhcpd.conf
+UDHCPD_START="192.168.2.20"
+UDHCPD_END="192.168.2.254"
+UDHCPD_SUBNET="255.255.255.0"
+LOCAL_IP="192.168.2.1"
+TELNET_DEBUG_PORT=23
+
+HOSTNAME="initrd"
+INIT_LOG="/init.log"
+
+write() {
+	echo -n "$2" > "$1"
+}
+
+config_enabled() {
+	if [ ! -e /proc/config.gz ]; then
+		return 1
+	fi
+
+	zcat /proc/config.gz | grep -E "^$1=y\$" > /dev/null
+	return $?
+}
+
+setup_rootfs() {
+
+	# create all the symlinks to /bin/busybox
+	/bin/busybox --install -s /bin
+
+	mkdir -p /dev
+	mount -t devtmpfs none /dev
+
+	mkdir /dev/pts
+	mount -t devpts none /dev/pts
+
+	mkdir /dev/shm
+	mount -t tmpfs none /dev/shm
+
+	mkdir -p /proc
+	mount -t proc none /proc
+
+	mkdir -p /sys
+	mount -t sysfs none /sys
+
+	mkdir -p /tmp
+	mount -t tmpfs none /tmp
+
+	mkdir -p /var
+	mount -t tmpfs none /var
+
+	# create helper symlinks
+	ln -s /proc/self/fd /dev/fd
+	ln -s /proc/self/fd/0 /dev/stdin
+	ln -s /proc/self/fd/1 /dev/stdout
+	ln -s /proc/self/fd/2 /dev/stderr
+
+	# mount devices
+	mdev -s
+}
+
+setup_log() {
+	mkdir /var/log
+	syslogd
+}
+
+device_init() {
+	# turn up the lights!
+	write /sys/class/leds/button-backlight/brightness 255
+}
+
+device_usb() {
+	if config_enabled "CONFIG_MACH_PICO"; then
+		write /sys/devices/platform/android_usb/usb_function_switch 4
+	fi
+}
+
+setup_hostname() {
+	hostname "$HOSTNAME"
+}
+
+# This sets up the USB with whatever USB_FUNCTIONS are set to
+usb_setup() {
+	write $ANDROID_USB/enable        0
+	write $ANDROID_USB/functions     ""
+	write $ANDROID_USB/enable        1
+	usleep 500000 # 0.5 delay to attempt to remove rndis function
+	write $ANDROID_USB/enable        0
+	write $ANDROID_USB/idVendor      18D1
+	write $ANDROID_USB/idProduct     D001
+	write $ANDROID_USB/iManufacturer "Boat-Loader"
+	write $ANDROID_USB/iProduct      "$1"
+	write $ANDROID_USB/functions     $USB_FUNCTIONS
+
+	# call device specific
+	device_usb
+
+	write $ANDROID_USB/enable        1
+	usleep 500000 # 0.5 delay to attempt to enable rndis function
+}
+
+setup_telnet_over_usb () {
+	USB_FUNCTIONS=rndis
+	usb_setup "Debug"
+
+	USB_INTERFACE=notfound
+	ifconfig rndis0 $LOCAL_IP && USB_INTERFACE=rndis0
+	if [ x$USB_INTERFACE = xnotfound ]; then
+		ifconfig usb0 $LOCAL_IP && USB_INTERFACE=usb0
+	fi
+	# Report for the logs
+	ifconfig -a
+
+	# write udhcpd conf
+	echo "start $UDHCPD_START" > $UDHCPD_CONF
+	echo "end $UDHCPD_END" >> $UDHCPD_CONF
+	echo "interface $USB_INTERFACE" >> $UDHCPD_CONF
+	echo "option subnet $UDHCPD_SUBNET" >> $UDHCPD_CONF
+	udhcpd /etc/udhcpd.conf
+}
+
+start_telnetd () {
+	telnetd -b ${LOCAL_IP}:${TELNET_DEBUG_PORT} -l /bin/sh
+}
+
+loop_forever () {
+	while : ; do
+		logger -t "heartbeat" "tick"
+		sleep 120
+	done
+}
+
+# ---------------------------------------------------------------------------- #
+
+set -x
+exec > $INIT_LOG 2>&1
+
+setup_rootfs
+setup_log
+
+device_init
+setup_hostname
+setup_telnet_over_usb
+start_telnetd
+loop_forever
